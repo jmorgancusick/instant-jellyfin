@@ -7,12 +7,15 @@
 terraform {
   backend "s3" {}
   required_providers {
-    aws = "~>2.53"
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
   }
 }
 
 locals {
-  server_name = var.HOSTED_ZONE_ID == "" ? aws_lb.jellyfin_alb.dns_name : trimsuffix(data.aws_route53_zone.jellyfin_domain.0.name,".")
+  server_name = var.HOSTED_ZONE_ID == "" ? aws_lb.jellyfin_alb.dns_name : trimsuffix(data.aws_route53_zone.jellyfin_domain[0].name,".")
 }
 /**
  * This is our provider setup.
@@ -208,7 +211,7 @@ resource "aws_eip" "jellyfin_eip" {
     Name        = "${var.ENVIRONMENT}-jellyfin_eip"
     Environment = var.ENVIRONMENT
   }
-  vpc = true
+  domain = "vpc"
 }
 
 resource "aws_instance" "jellyfin_server" {
@@ -440,19 +443,27 @@ resource "aws_acm_certificate" "jellyfin_cert" {
   validation_method = "DNS"
 }
 
-resource "aws_route53_record" "jellyfin_cert_validation_record" {
-  count = var.HOSTED_ZONE_ID == "" ? 0 : 1
-  name    = aws_acm_certificate.jellyfin_cert.0.domain_validation_options.0.resource_record_name
-  type    = aws_acm_certificate.jellyfin_cert.0.domain_validation_options.0.resource_record_type
-  zone_id = data.aws_route53_zone.jellyfin_domain.0.id
-  records = [aws_acm_certificate.jellyfin_cert.0.domain_validation_options.0.resource_record_value]
-  ttl     = 60
+resource "aws_route53_record" "jellyfin_cert_validation_records" {
+  for_each = var.HOSTED_ZONE_ID == "" ? {} : {
+    for dvo in aws_acm_certificate.jellyfin_cert[0].domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+
+  allow_overwrite = true
+  name            = each.value.name
+  records         = [each.value.record]
+  ttl             = 60
+  type            = each.value.type
+  zone_id         = data.aws_route53_zone.jellyfin_domain[0].id
 }
 
 resource "aws_acm_certificate_validation" "jellyfin_cert_validation" {
   count = var.HOSTED_ZONE_ID == "" ? 0 : 1
-  certificate_arn         = aws_acm_certificate.jellyfin_cert.0.arn
-  validation_record_fqdns = [aws_route53_record.jellyfin_cert_validation_record.0.fqdn]
+  certificate_arn         = aws_acm_certificate.jellyfin_cert[0].arn
+  validation_record_fqdns = [for record in aws_route53_record.jellyfin_cert_validation_records : record.fqdn]
 }
 
 resource "aws_lb" "jellyfin_alb" {
@@ -517,7 +528,7 @@ resource "aws_lb_listener" "jellyfin_https" {
   port              = "443"
   protocol          = "HTTPS"
   ssl_policy        = "ELBSecurityPolicy-2016-08"
-  certificate_arn = aws_acm_certificate_validation.jellyfin_cert_validation.0.certificate_arn
+  certificate_arn = aws_acm_certificate_validation.jellyfin_cert_validation[0].certificate_arn
 
   default_action {
     type             = "forward"
@@ -538,8 +549,8 @@ resource "aws_lb_target_group_attachment" "jellyfin_server_attachment" {
 
 resource "aws_route53_record" "jellyfin_domain_record" {
   count = var.HOSTED_ZONE_ID == "" ? 0 : 1
-  zone_id = data.aws_route53_zone.jellyfin_domain.0.zone_id
-  name    = trimsuffix(data.aws_route53_zone.jellyfin_domain.0.name,".")
+  zone_id = data.aws_route53_zone.jellyfin_domain[0].zone_id
+  name    = trimsuffix(data.aws_route53_zone.jellyfin_domain[0].name,".")
   type    = "A"
   alias {
     name                   = aws_lb.jellyfin_alb.dns_name
